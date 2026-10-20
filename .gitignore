@@ -1,0 +1,27 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# Virtual environments
+.venv
+
+# Data and large artifacts (too big for git; see README for how to download)
+data/
+models/
+plots/
+benchmark/
+submissions/
+kaggle_assets/
+.idea/
+
+# Model/numeric artifacts
+*.pt
+*.pth
+*.joblib
+*.npz
+*.npy
+*.parquet

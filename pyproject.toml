@@ -1,0 +1,20 @@
+[project]
+name = "enveda-casmi26"
+version = "0.1.0"
+description = "Add your description here"
+requires-python = ">=3.12"
+dependencies = [
+    "kagglehub>=1.0.2",
+    "matplotlib>=3.11.2",
+    "pandas>=3.0.6",
+    "pyarrow>=26.0.0",
+    "rdkit==2026.3.6",
+    "scikit-learn>=1.9.1",
+]
+
+[project.scripts]
+enveda-casmi26 = "enveda_casmi26:main"
+
+[build-system]
+requires = ["uv_build>=0.12.23,<0.13.0"]
+build-backend = "uv_build"
