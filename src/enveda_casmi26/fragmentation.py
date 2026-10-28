@@ -29,6 +29,7 @@ enable them once likelihood-weighted scoring is available.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from itertools import combinations, combinations_with_replacement
 
@@ -66,6 +67,8 @@ ADDUCTS = {
     "[M+H-H2O]+": (-17.003288, 1),
     "[M+H-2H2O]+": (-35.013853, 1),
     "[M-H-H2O]-": (-19.017841, 1),
+    "[M+H-NH3]+": (PROTON_MASS - 17.0265481, 1),
+    "[M-H-NH3]-": (-PROTON_MASS - 17.0265481, 1),
     "[M]+": (0.0, 1),
     "[M]-": (0.0, 1),
     "[M+2H]2+": (2 * PROTON_MASS, 2),
@@ -84,6 +87,56 @@ ADDUCT_ALIASES = {
 }
 
 RADICAL_ADDUCTS = {"[M]+", "[M]-"}
+
+
+ELECTRON_MASS = 0.000548579909
+_ADDUCT_ELEMENTS = dict(MONOISOTOPIC_MASSES)
+_ADDUCT_ELEMENTS.update({
+    "Na": 22.9897692820, "K": 38.9637064864, "Li": 7.0160034366,
+    "Mg": 23.985041697, "Ca": 39.962590863, "Al": 26.98153853,
+    "Fe": 55.93493633, "Zn": 63.92914234, "Cu": 62.92959772,
+    "Mn": 54.93804514, "Se": 79.9165218, "B": 11.00930536,
+})
+
+
+def parse_adduct_label(label: str):
+    """Generic adduct parser: "[2M+Na]+" -> (n_molecules, delta, charge).
+
+    delta is the *ion* mass offset (atom masses with the electron correction
+    for the net charge, matching the ADDUCTS convention), so the ion m/z is
+    (n_molecules * neutral_mass + delta) / charge. Returns None for labels
+    that cannot be parsed (unknown element, missing molecule term, ...).
+    Dimer/oligomer labels ([2M+H]+, [3M+K]+, ...) are handled exactly,
+    unlike the ADDUCT_ALIASES collapse to monomer adducts.
+    """
+    m = re.fullmatch(r"\[(?P<body>[^\]]*)\](?P<charge>\d*[+-])", label.strip())
+    if m is None:
+        return None
+    body, charge_s = m.group("body"), m.group("charge")
+    sign = 1.0 if charge_s.endswith("+") else -1.0
+    z = max(1, int(charge_s[:-1])) if charge_s[:-1] else 1
+    n, delta = 0, 0.0
+    for msign, term in re.findall(r"([+-])?([^+-]+)", "+" + body):
+        s = -1.0 if msign == "-" else 1.0
+        mt = re.fullmatch(r"(\d*)M", term)
+        if mt:
+            n += int(mt.group(1) or "1") * int(s)
+            continue
+        lead = re.match(r"^(\d+)", term)
+        mult = int(lead.group(1)) if lead else 1
+        formula = term[lead.end():] if lead else term
+        if not formula or not re.fullmatch(r"(?:[A-Z][a-z]?\d*)*", formula):
+            return None
+        mass = 0.0
+        for el, cnt in re.findall(r"([A-Z][a-z]?)(\d*)", formula):
+            if el not in _ADDUCT_ELEMENTS:
+                return None
+            mass += _ADDUCT_ELEMENTS[el] * (int(cnt) if cnt else 1)
+        delta += s * mult * mass
+    if n == 0:
+        return None
+    delta -= sign * z * ELECTRON_MASS
+    return n, delta, z
 
 # Fragment ion charge states per precursor adduct. Singly-charged precursors keep
 # their carrier at charge 1 (doubly-charged fragments would be charge-separated

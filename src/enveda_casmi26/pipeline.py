@@ -25,19 +25,27 @@ warnings.filterwarnings("ignore", message="Mean of empty slice")
 import numpy as np
 import pandas as pd
 
-from enveda_casmi26.fragmentation import ADDUCTS, ADDUCT_ALIASES
+from enveda_casmi26.fragmentation import ADDUCTS, ADDUCT_ALIASES, parse_adduct_label
 
 
 def neutral_mass(precursor_mz: float, adduct: str) -> float:
-    """Neutral monoisotopic mass implied by a precursor m/z and adduct."""
+    """Neutral monomer mass implied by a precursor m/z and adduct label.
+
+    Oligomer adducts ([2M+H]+, [3M+K]+, ...) are divided by their molecule
+    count: the recorded precursor m/z is the oligomer ion (verified on train:
+    99.6% of [2M+...]-labeled rows match the dimer ion, not the monomer).
+    """
+    if not np.isfinite(precursor_mz):
+        return math.nan
+    parsed = parse_adduct_label(adduct)
+    if parsed is not None:
+        n, delta, z = parsed
+        return (precursor_mz * z - delta) / n
     base = ADDUCT_ALIASES.get(adduct, adduct)
-    if base not in ADDUCTS or not np.isfinite(precursor_mz):
+    if base not in ADDUCTS:
         return math.nan
     delta, charge = ADDUCTS[base]
-    mass = precursor_mz * charge - delta
-    if adduct.startswith("[2M"):
-        mass /= 2.0
-    return mass
+    return precursor_mz * charge - delta
 
 
 def ce_bucket(value, unit: str | None) -> int:
@@ -238,13 +246,18 @@ class ChannelEngine:
 
     def __init__(self, pool: CandidatePool, library: SpectralLibrary,
                  scorer=None, max_frag_candidates: int = 60,
-                 fp_predictor=None, candidate_fp_lookup=None) -> None:
+                 fp_predictor=None, candidate_fp_lookup=None,
+                 denovo_predictor=None,
+                 fp_budget: int = 60, sim_budget: int = 30) -> None:
         self.pool = pool
         self.library = library
         self.scorer = scorer
         self.max_frag_candidates = max_frag_candidates
         self.fp_predictor = fp_predictor
         self.candidate_fp_lookup = candidate_fp_lookup
+        self.denovo_predictor = denovo_predictor
+        self.fp_budget = fp_budget
+        self.sim_budget = sim_budget
         self._frag_cache: dict[tuple[str, str], object] = {}
 
     def mass_scores(self, cand_idx: np.ndarray, query_mass: float) -> np.ndarray:
@@ -277,7 +290,7 @@ class ChannelEngine:
                 self._frag_cache.clear()
         return self._frag_cache[ck]
 
-    def _frag_matrix(self, molecule: Molecule, cand_idx: np.ndarray):
+    def _frag_matrix(self, molecule: Molecule, cand_idx: np.ndarray, sim=None):
         """ EIF matrix and learned P(true) matrix, both (n_spectra, n_candidates)."""
         from enveda_casmi26.scoring import candidate_row
 
@@ -287,7 +300,6 @@ class ChannelEngine:
         eif = np.full((n_s, n_c), np.nan)
         learned = np.full((n_s, n_c), np.nan)
         order = np.argsort(np.abs(self.pool.masses[cand_idx] - molecule.neutral_mass))
-        frag_positions = set(order[: self.max_frag_candidates].tolist())
         cand_tani = np.zeros(n_c)
         if self.fp_predictor is not None and self.candidate_fp_lookup is not None:
             pred = self.fp_predictor(molecule)
@@ -299,6 +311,18 @@ class ChannelEngine:
                     inter = float(np.logical_and(pred, cf).sum())
                     union = float(pred.sum() + cf.sum() - inter)
                     cand_tani[j] = inter / union if union > 0 else 0.0
+        # union budget: mass proximity alone is a weak selector in dense
+        # windows; candidates rescued by the fingerprint or analog-similarity
+        # channels (both computed across all of the molecule's spectra) also
+        # earn fragment-scoring slots
+        frag_positions = set(order[: self.max_frag_candidates].tolist())
+        if self.fp_budget:
+            top_fp = np.argsort(-cand_tani)[: self.fp_budget]
+            frag_positions |= {int(j) for j in top_fp if cand_tani[j] > 0.02}
+        if sim is not None and self.sim_budget:
+            sim = np.asarray(sim, dtype=float)
+            top_sim = np.argsort(-sim)[: self.sim_budget]
+            frag_positions |= {int(j) for j in top_sim if sim[j] > 0.5}
         for si, spec in enumerate(molecule.spectra):
             rows = [None] * n_c
             for j in range(n_c):
@@ -323,21 +347,62 @@ class ChannelEngine:
                         learned[si, j] = p
         return eif, learned
 
-    def eif_scores(self, molecule: Molecule, cand_idx: np.ndarray) -> np.ndarray:
-        eif, _ = self._frag_matrix(molecule, cand_idx)
+    def eif_scores(self, molecule: Molecule, cand_idx: np.ndarray, sim=None) -> np.ndarray:
+        eif, _ = self._frag_matrix(molecule, cand_idx, sim=sim)
         return np.nanmean(eif, axis=0)
 
-    def learned_scores(self, molecule: Molecule, cand_idx: np.ndarray) -> np.ndarray:
-        _, learned = self._frag_matrix(molecule, cand_idx)
+    def learned_scores(self, molecule: Molecule, cand_idx: np.ndarray,
+                       sim=None) -> np.ndarray:
+        _, learned = self._frag_matrix(molecule, cand_idx, sim=sim)
         return np.nanmean(learned, axis=0)
 
-    def all_channels(self, molecule: Molecule, cand_idx: np.ndarray) -> dict[str, np.ndarray]:
-        eif, learned = self._frag_matrix(molecule, cand_idx)
-        sim = self.sim_scores(molecule, cand_idx)
+    def denovo_scores(self, molecule: Molecule, cand_idx: np.ndarray,
+                      tani_min: float = 0.0) -> np.ndarray:
+        """Third channel: evidence from de novo sampled structures.
+
+        Candidates whose inchikey14 was sampled exactly score 1.0; all
+        others get the best Morgan Tanimoto between themselves and any
+        sampled structure, floored at tani_min. Molecules with no valid
+        generations score all-zero (neutral after z-scoring).
+        """
+        out = np.zeros(len(cand_idx))
+        if self.denovo_predictor is None or len(cand_idx) == 0:
+            return out
+        try:
+            gens = self.denovo_predictor(molecule)
+        except Exception:
+            return out
+        if not gens:
+            return out
+        keys = self.pool.keys[cand_idx]
+        gen_keys = {g[1] for g in gens}
+        for j, key in enumerate(keys):
+            if key in gen_keys:
+                out[j] = 1.0
+        if self.candidate_fp_lookup is None:
+            return out
+        gen_fps = np.stack([g[2] for g in gens])
+        gen_pop = gen_fps.sum(axis=1)
+        for j, key in enumerate(keys):
+            if out[j] > 0:
+                continue
+            cf = self.candidate_fp_lookup(key)
+            if cf is None:
+                continue
+            inter = np.logical_and(gen_fps, cf).sum(axis=1)
+            union = gen_pop + int(cf.sum()) - inter
+            tani = np.where(union > 0, inter / np.maximum(union, 1), 0.0)
+            out[j] = max(float(tani.max()) - tani_min, 0.0)
+        return out
+
+    def all_channels(self, molecule: Molecule, cand_idx: np.ndarray,
+                     sim=None) -> dict[str, np.ndarray]:
+        sim_scores = self.sim_scores(molecule, cand_idx) if sim is None else sim
+        eif, learned = self._frag_matrix(molecule, cand_idx, sim=sim_scores)
         return {
             "mass": self.mass_scores(cand_idx, molecule.neutral_mass),
-            "sim": sim,
-            "simclip": np.maximum(sim - 0.6, 0.0),
+            "sim": sim_scores,
+            "simclip": np.maximum(sim_scores - 0.6, 0.0),
             "eif": np.nanmean(eif, axis=0),
             "learned": np.nanmean(learned, axis=0),
         }

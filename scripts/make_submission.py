@@ -21,19 +21,11 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT / "scripts"))
 sys.path.insert(0, str(PROJECT_ROOT / "src"))
 
-from enveda_casmi26.fragmentation import ADDUCTS, ADDUCT_ALIASES
+from enveda_casmi26.pipeline import neutral_mass
 from similarity_baseline import Library
 
 DATA_DIR = PROJECT_ROOT / "data"
 N_SLOTS = 25
-
-
-def neutral_mass(precursor_mz: float, adduct: str):
-    adduct = ADDUCT_ALIASES.get(adduct, adduct)
-    if adduct not in ADDUCTS or not np.isfinite(precursor_mz):
-        return np.nan
-    delta, charge = ADDUCTS[adduct]
-    return precursor_mz * charge - delta
 
 
 def main() -> None:
