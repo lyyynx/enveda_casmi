@@ -18,6 +18,8 @@ from tokenizers import Tokenizer, models, trainers, processors
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from enveda_casmi26.fp_model import DeNovoModel
 
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
 sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
 
@@ -138,19 +140,22 @@ def main():
     ap.add_argument("--max-peaks", type=int, default=128)
     ap.add_argument("--lr", type=float, default=1e-4)
     ap.add_argument("--grad-accum", type=int, default=2)
-    ap.add_argument("--out", default="models/denovo_v1.pt")
+    ap.add_argument("--out", default=os.path.join(ROOT, "models", "denovo_v1.pt"))
     ap.add_argument("--resume", default=None)
     ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--diff-channel", action="store_true",
+                    help="add pairwise m/z-difference (autocorrelation/power spectrum) input channel")
+    ap.add_argument("--data", default=os.path.join(ROOT, "data", "train_cut.parquet"))
     args = ap.parse_args()
     torch.manual_seed(args.seed)
 
     t0 = time.time()
     (train_df, train_mz, train_int), (val_df, val_mz, val_int) = load_training_data(
-        r"data\train_cut.parquet", args.spectra, args.max_peaks, args.seed)
+        args.data, args.spectra, args.max_peaks, args.seed)
 
     tok = build_tokenizer(train_df.normalized_smiles.unique().tolist(), args.vocab_size)
-    os.makedirs("models", exist_ok=True)
-    tok.save("models/denovo_tokenizer.json")
+    os.makedirs(os.path.join(ROOT, "models"), exist_ok=True)
+    tok.save(os.path.join(ROOT, "models", "denovo_tokenizer.json"))
 
     train_tokens = [np.asarray(tok.encode(s).ids, dtype=np.int64)
                     for s in train_df.normalized_smiles.values]
@@ -164,7 +169,7 @@ def main():
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model = DeNovoModel(args.embed_dim, args.n_layers, args.n_heads, args.ff_dim,
-                        vocab_size=args.vocab_size).to(device)
+                        vocab_size=args.vocab_size, diff_channel=args.diff_channel).to(device)
     n_params = sum(p.numel() for p in model.parameters())
     print(f"model: {n_params / 1e6:.1f}M params on {device}")
     opt = torch.optim.AdamW(model.parameters(), lr=args.lr)

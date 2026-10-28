@@ -21,6 +21,8 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from scripts.train_denovo import DeNovoModel, make_batch
 
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
 
 def morgan_bits(smiles, fp_gen, n_bits):
     from rdkit import Chem
@@ -52,9 +54,12 @@ def embed_spectra(model, device, mz_list, int_list, prec_list, batch=256):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--encoder", default="models/denovo_v1.pt")
-    ap.add_argument("--cache", default="data/fp_embed_cache.npz")
-    ap.add_argument("--out", default="models/fp_head.pt")
+    ap.add_argument("--encoder", default=os.path.join(ROOT, "models", "denovo_v1.pt"))
+    ap.add_argument("--cache", default=os.path.join(ROOT, "data", "fp_embed_cache.npz"))
+    ap.add_argument("--data", default=os.path.join(ROOT, "data", "train_cut.parquet"),
+                    help="training parquet (change when using repaired data; "
+                         "then also point --cache at a new file)")
+    ap.add_argument("--out", default=os.path.join(ROOT, "models", "fp_head.pt"))
     ap.add_argument("--n-bits", type=int, default=2048)
     ap.add_argument("--epochs", type=int, default=4)
     ap.add_argument("--batch-size", type=int, default=4096)
@@ -73,7 +78,8 @@ def main():
     ckpt = torch.load(args.encoder, map_location=device, weights_only=True)
     cfg = ckpt["config"]
     model = DeNovoModel(cfg["embed_dim"], cfg["n_layers"], cfg["n_heads"],
-                        cfg["ff_dim"], vocab_size=cfg["vocab_size"])
+                        cfg["ff_dim"], vocab_size=cfg["vocab_size"],
+                        diff_channel=cfg.get("diff_channel", False))
     model.load_state_dict(ckpt["state_dict"])
     model.eval().to(device)
     print(f"encoder loaded (val_exact_hit={ckpt.get('val_exact_hit')})")
@@ -85,7 +91,7 @@ def main():
         y_all = np.unpackbits(cache["y"], axis=1).astype(bool)
         keys_all = cache["keys"]
         is_val = cache["is_val"]
-        meta = pd.read_parquet(r"data\train_cut.parquet",
+        meta = pd.read_parquet(args.data,
                                columns=["inchikey14", "normalized_smiles"])
         meta = meta.dropna(subset=["normalized_smiles"]).drop_duplicates("inchikey14")
         smiles_map = dict(zip(meta.inchikey14, meta.normalized_smiles))
@@ -94,7 +100,7 @@ def main():
         val_smiles = [smiles_map[k] for k in val_keys]
     else:
         print("reading data ...")
-        df = pd.read_parquet(r"data\train_cut.parquet", columns=[
+        df = pd.read_parquet(args.data, columns=[
             "inchikey14", "normalized_smiles", "precursor_mz",
             "ms2_mzs", "ms2_normalized_intensities", "ingest_lib"])
         df = df[df.ingest_lib != "enveda-180"].dropna(subset=["normalized_smiles"])

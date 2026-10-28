@@ -21,7 +21,8 @@ def load_model(ckpt_path, device):
     ckpt = torch.load(ckpt_path, map_location=device, weights_only=True)
     cfg = ckpt["config"]
     model = DeNovoModel(cfg["embed_dim"], cfg["n_layers"], cfg["n_heads"],
-                        cfg["ff_dim"], vocab_size=cfg["vocab_size"])
+                        cfg["ff_dim"], vocab_size=cfg["vocab_size"],
+                        diff_channel=cfg.get("diff_channel", False))
     model.load_state_dict(ckpt["state_dict"])
     model.eval().to(device)
     return model, ckpt

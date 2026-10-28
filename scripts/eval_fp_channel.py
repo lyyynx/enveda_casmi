@@ -43,7 +43,8 @@ def main():
     enc_ckpt = torch.load(args.encoder, map_location=device, weights_only=True)
     cfg = enc_ckpt["config"]
     model = DeNovoModel(cfg["embed_dim"], cfg["n_layers"], cfg["n_heads"],
-                        cfg["ff_dim"], vocab_size=cfg["vocab_size"])
+                        cfg["ff_dim"], vocab_size=cfg["vocab_size"],
+                        diff_channel=cfg.get("diff_channel", False))
     model.load_state_dict(enc_ckpt["state_dict"])
     model.eval().to(device)
     head_ckpt = torch.load(args.head, map_location=device, weights_only=True)

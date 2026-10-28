@@ -45,6 +45,9 @@ def main():
                     help="drop spectra whose SMILES tokenize longer than this")
     ap.add_argument("--lr", type=float, default=5e-5)
     ap.add_argument("--grad-accum", type=int, default=4)
+    ap.add_argument("--diff-channel", action="store_true",
+                    help="add pairwise m/z-difference (autocorrelation/power spectrum) input channel")
+    ap.add_argument("--data", default=os.path.join(ROOT, "data", "train_cut.parquet"))
     ap.add_argument("--tokenizer", default=os.path.join(ROOT, "models", "denovo_tokenizer.json"))
     ap.add_argument("--rebuild-tokenizer", action="store_true")
     ap.add_argument("--out", default=os.path.join(ROOT, "models", "denovo_v2.pt"))
@@ -64,7 +67,7 @@ def main():
 
     t0 = time.time()
     (train_df, train_mz, train_int), (val_df, val_mz, val_int) = load_training_data(
-        os.path.join(ROOT, "data", "train_cut.parquet"), args.spectra, args.max_peaks, args.seed)
+        args.data, args.spectra, args.max_peaks, args.seed)
 
     if args.rebuild_tokenizer or not os.path.exists(args.tokenizer):
         tok = build_tokenizer(train_df.normalized_smiles.unique().tolist(), args.vocab_size)
@@ -111,7 +114,8 @@ def main():
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model = DeNovoV2Model(args.embed_dim, args.enc_layers, args.dec_layers,
-                          args.n_heads, args.ff_dim, vocab_size=args.vocab_size).to(device)
+                          args.n_heads, args.ff_dim, vocab_size=args.vocab_size,
+                          diff_channel=args.diff_channel).to(device)
     n_params = sum(p.numel() for p in model.parameters())
     print(f"model: {n_params / 1e6:.1f}M params on {device}")
     opt = torch.optim.AdamW(model.parameters(), lr=args.lr)
