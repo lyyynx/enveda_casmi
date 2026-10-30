@@ -8,7 +8,7 @@ dependencies = [
     "matplotlib>=3.11.2",
     "pandas>=3.0.6",
     "pyarrow>=26.0.0",
-    "rdkit==2026.3.6",
+    "rdkit==2026.9.1",
     "scikit-learn>=1.9.1",
 ]
 

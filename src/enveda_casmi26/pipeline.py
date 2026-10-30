@@ -258,7 +258,14 @@ class ChannelEngine:
         self.denovo_predictor = denovo_predictor
         self.fp_budget = fp_budget
         self.sim_budget = sim_budget
-        self._frag_cache: dict[tuple[str, str], object] = {}
+        # bounded LRU: Fragmentor objects hold full fragmentation trees and
+        # can be ~100KB+ each; an unbounded (40k) cache OOMs competition
+        # scoring runs. Capacity 2000 comfortably covers the candidate set of
+        # a molecule (plus mass-window overlap with recent neighbors).
+        from collections import OrderedDict
+
+        self._frag_cache: "OrderedDict[tuple[str, str], object]" = OrderedDict()
+        self._frag_cache_cap = 2000
 
     def mass_scores(self, cand_idx: np.ndarray, query_mass: float) -> np.ndarray:
         return -np.abs(self.pool.masses[cand_idx] - query_mass)
@@ -281,14 +288,17 @@ class ChannelEngine:
         from enveda_casmi26.fragmentation import Fragmentor
 
         ck = (smiles, adduct)
-        if ck not in self._frag_cache:
-            try:
-                self._frag_cache[ck] = Fragmentor(smiles, adduct=adduct, tolerance_ppm=10.0)
-            except Exception:
-                self._frag_cache[ck] = None
-            if len(self._frag_cache) > 40000:
-                self._frag_cache.clear()
-        return self._frag_cache[ck]
+        if ck in self._frag_cache:
+            self._frag_cache.move_to_end(ck)
+            return self._frag_cache[ck]
+        try:
+            frag = Fragmentor(smiles, adduct=adduct, tolerance_ppm=10.0)
+        except Exception:
+            frag = None
+        self._frag_cache[ck] = frag
+        if len(self._frag_cache) > self._frag_cache_cap:
+            self._frag_cache.popitem(last=False)
+        return frag
 
     def _frag_matrix(self, molecule: Molecule, cand_idx: np.ndarray, sim=None):
         """ EIF matrix and learned P(true) matrix, both (n_spectra, n_candidates)."""
